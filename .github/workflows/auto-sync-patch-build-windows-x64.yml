@@ -1,0 +1,117 @@
+name: Auto-Sync Patch & Build (Windows x64)
+
+on:
+  schedule:
+    # Runs at 00:00 UTC every day
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    # Allows manual triggering for testing
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-sync:
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.sync.outputs.has_changes }}
+      short_sha: ${{ steps.sync.outputs.short_sha }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0 # Required to fetch all history for merging
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync with Upstream
+        id: sync
+        run: |
+          # Add the official upstream repository
+          git remote add upstream https://github.com/aria2/aria2.git
+          git fetch upstream master
+
+          # Get commit hashes
+          LOCAL_HASH=$(git rev-parse HEAD)
+          UPSTREAM_HASH=$(git rev-parse upstream/master)
+          SHORT_SHA=$(git rev-parse --short upstream/master)
+
+          echo "Local hash: $LOCAL_HASH"
+          echo "Upstream hash: $UPSTREAM_HASH"
+
+          # Compare hashes to check for updates
+          if [ "$LOCAL_HASH" != "$UPSTREAM_HASH" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Updates found or manual trigger detected."
+            
+            # Sync local master with upstream master
+            git checkout master
+            git merge upstream/master
+            git push origin master
+            
+            # Set output variables for the next job
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          else
+            echo "No updates found."
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-release:
+    needs: check-and-sync
+    # Run only if changes were detected OR if manually triggered
+    if: needs.check-and-sync.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Get Current Date
+        run: echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      - name: Apply Max Connection Patch
+        run: |
+          echo "Patching connection limit in src/OptionHandlerFactory.cc..."
+          sed -i "s/\"1\", 1, 16, 'x'/\"1\", 1, 2147483647, 'x'/g" src/OptionHandlerFactory.cc
+          echo "Verify patch here:"
+          grep -C 2 "PREF_MAX_CONNECTION_PER_SERVER" src/OptionHandlerFactory.cc
+
+      - name: Apply gmplib.org Link Patch
+        run: |
+          # Unable to download files from gmplib.org via GitHub Actions
+          echo "Replacing the gmplib.org link with GNU FTP mirror in Dockerfile.mingw..."
+          sed -i 's|https://gmplib.org/download/gmp/|https://ftp.gnu.org/gnu/gmp/|g' Dockerfile.mingw
+
+      - name: Build Windows x64 Binary
+        run: |
+          # Build using the provided Mingw Dockerfile
+          docker build \
+            --tag aria2-mingw-x64 \
+            --build-arg HOST=x86_64-w64-mingw32 \
+            --file Dockerfile.mingw \
+            .
+
+          # Extract the compiled binary
+          container_id=$(docker create aria2-mingw-x64)
+          docker cp $container_id:/aria2/src/aria2c.exe aria2c.exe
+          docker rm -v $container_id
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: release-${{ needs.check-and-sync.outputs.short_sha }}
+          name: aria2 Custom Build ${{ needs.check-and-sync.outputs.short_sha }}
+          body: |
+            **Automated Build from Upstream**
+
+            - **Upstream Commit:** ${{ needs.check-and-sync.outputs.short_sha }}
+            - **Build Date:** ${{ env.BUILD_DATE }}
+            - **Modification:** `max-connection-per-server` limit unlocked to `2147483647`.
+
+            *This release was triggered because the official aria2 repository was updated.*
+          files: aria2c.exe
+          draft: false
+          prerelease: false
