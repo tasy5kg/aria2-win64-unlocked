@@ -71,12 +71,17 @@ jobs:
       - name: Get Current Date
         run: echo "BUILD_DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
 
-      - name: Patch Max Connection
+      - name: Unlock aria2 limits
         run: |
-          echo "Patching connection limit in src/OptionHandlerFactory.cc..."
-          sed -i "s/\"1\", 1, 16, 'x'/\"1\", 1, 2147483647, 'x'/g" src/OptionHandlerFactory.cc
-          echo "Verify patch here:"
-          grep -C 2 "PREF_MAX_CONNECTION_PER_SERVER" src/OptionHandlerFactory.cc
+          echo "Unlocking limits in src/OptionHandlerFactory.cc..."
+          # remove max-connection-per-server limit
+          sed -i "s/\"1\", 1, 16, 'x'/\"1\", 1, -1, 'x'/g" src/OptionHandlerFactory.cc
+          # remove min-split-size limit
+          sed -i "s/\"20M\", 1_m, 1_g, 'k'/\"20M\", 1, -1, 'k'/g" src/OptionHandlerFactory.cc
+          # remove socket-recv-buffer-size limit
+          sed -i "s/\"1M\", 1_m, 1_g/\"1M\", 1, -1/g" src/OptionHandlerFactory.cc
+          # remove piece-length limit
+          sed -i "s/\"0\", 0, 16_m/\"0\", 0, -1/g" src/OptionHandlerFactory.cc
 
       - name: Patch Dockerfile
         run: |
